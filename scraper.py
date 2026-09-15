@@ -37,7 +37,8 @@ DEFAULT_QUERY_ROTATION: list[str] = [
 
 DEFAULT_PLATFORMS: list[str] = ["linkedin", "indeed", "glassdoor", "zip_recruiter", "google"]
 
-# Candidate's target job market: Canada (Toronto/Montreal/Ottawa/Vancouver) + France (Paris/Lyon)
+# Candidate's target job markets: Canada, France, Netherlands, French-speaking
+# Switzerland, and Spain.
 DEFAULT_LOCATIONS: list[str] = [
     "Toronto, Canada",
     "Montreal, Canada",
@@ -45,6 +46,11 @@ DEFAULT_LOCATIONS: list[str] = [
     "Vancouver, Canada",
     "Paris, France",
     "Lyon, France",
+    "Eindhoven, Netherlands",
+    "Amsterdam, Netherlands",
+    "Geneva, Switzerland",
+    "Lausanne, Switzerland",
+    "Barcelona, Spain",
 ]
 
 

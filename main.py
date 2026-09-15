@@ -93,8 +93,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--hours-old",
         type=int,
-        default=72,
-        help="Post age window in hours",
+        default=336,
+        help="Post age window in hours (default: 336 = 2 weeks)",
     )
     parser.add_argument(
         "--is-remote",

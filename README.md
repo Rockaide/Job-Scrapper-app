@@ -46,9 +46,9 @@ Not committed to version control (see `.gitignore`): `.venv/`, `__pycache__/`, `
 As configured today, a default run (`python main.py`, no flags):
 
 - **Platforms**: LinkedIn, Indeed, Glassdoor, ZipRecruiter, Google Jobs (`DEFAULT_PLATFORMS` in `scraper.py`). Glassdoor is known to be unreliable for non-US locations (`jobspy` CSRF-token bootstrap issue on `.ca`/`.fr` domains) but fails gracefully without blocking the other platforms.
-- **Locations**: Toronto, Montreal, Ottawa, Vancouver (Canada), Paris, Lyon (France) — each searched with a 50-mile radius (`--distance`) so satellite/conurbated cities (Mississauga, Hamilton, Gatineau, Laval, Longueuil, greater Île-de-France, etc.) are included without listing them individually.
+- **Locations**: Toronto, Montreal, Ottawa, Vancouver (Canada); Paris, Lyon (France); Eindhoven, Amsterdam (Netherlands); Geneva, Lausanne (Switzerland); Barcelona (Spain) — the candidate's target job markets. Each is searched with a 50-mile radius (`--distance`) so satellite/conurbated cities (Mississauga, Hamilton, Gatineau, Laval, Longueuil, greater Île-de-France, etc.) are included without listing them individually.
 - **Queries**: 10 rotating search terms from `DEFAULT_QUERY_ROTATION` in `scraper.py`, ranging from RISC-V/CPU/ASIC/FPGA-specific titles to broader ones (`Hardware Engineer`, `Digital Design Engineer`, `Junior Verification Engineer`).
-- **Posting age window**: last 72 hours (`--hours-old`).
+- **Posting age window**: last 2 weeks / 336 hours (`--hours-old`).
 - **Seniority filter**: Senior+ titles excluded (`--include-senior` to disable).
 - **Citizenship/sponsorship filter**: restricted postings excluded (`--include-restricted` to disable).
 - **Minimum score**: 8.0 (`--min-score`).
@@ -86,11 +86,11 @@ pip install -r requirements.txt
 # Demo mode: run the full pipeline against offline fixture data, no network calls
 python main.py --demo
 
-# Default live run: 10 queries x 6 cities (Toronto/Montreal/Ottawa/Vancouver/Paris/Lyon), 72h window
+# Default live run: 10 queries x 11 cities, 2-week posting window, up to 50 results/query/platform
 python main.py
 
-# Wider posting-age window and a capped per-search result count (recommended for a first run)
-python main.py --hours-old 168 --results-wanted 25
+# Narrower run for a quicker/cheaper test pass
+python main.py --hours-old 72 --results-wanted 15
 
 # Override the target cities (semicolon-separated, since each entry reads "City, Country")
 python main.py --locations "Toronto, Canada;Paris, France"
@@ -112,10 +112,10 @@ python -m unittest tests.py -v
 
 | Flag | Default | Description |
 |---|---|---|
-| `--locations` | 6 target cities | Semicolon-separated cities/regions to search |
+| `--locations` | 11 target cities | Semicolon-separated cities/regions to search |
 | `--location` | *(unset)* | Single-location override, replaces `--locations` entirely |
 | `--distance` | `50` | Search radius in miles around each location |
-| `--hours-old` | `72` | Maximum posting age, in hours |
+| `--hours-old` | `336` | Maximum posting age, in hours (336 = 2 weeks) |
 | `--is-remote` | `False` | Restrict to remote-only postings |
 | `--results-wanted` | `50` | Listings requested per platform per query/location |
 | `--min-score` | `8.0` | Minimum composite score to curate a posting |
