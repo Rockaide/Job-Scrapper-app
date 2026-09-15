@@ -1,2 +1,2 @@
 # Job-Scrapper-app
-Job posting site scraping
+**Small app made with Python and Claude.ai to automatically scrape job posting platforms. Currently set for design verification and digital design.
