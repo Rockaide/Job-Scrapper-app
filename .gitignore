@@ -1,0 +1,14 @@
+# Virtual environment
+.venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Local runtime data (regenerated per run)
+jobs.db
+curated_jobs_*.csv
+curated_jobs_*.md
+
+# Personal data - never commit
+Vinicius_Rocca_CV.md
