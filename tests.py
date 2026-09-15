@@ -26,6 +26,7 @@ from reporter import (
     PipelineMetrics,
     export_to_csv,
     export_to_markdown,
+    extract_country,
 )
 from scraper import DEFAULT_QUERY_ROTATION, ScraperConfig
 
@@ -317,26 +318,38 @@ class TestReporter(unittest.TestCase):
             self.assertEqual(row["Category"], CAT_RISCV)
             self.assertIn("risc-v", row["Matched Keywords"])
 
-    def test_export_to_markdown_category_grouping_and_ordering(self):
-        """Verify Markdown groups jobs with RISC-V first and sorts descending by score."""
+    def test_export_to_markdown_country_grouping_and_ordering(self):
+        """Verify Markdown groups jobs by country (target-market order) and sorts
+        descending by score within each country."""
         jobs = [
             {
                 "title": "FPGA Accelerator",
                 "company": "AMD",
+                "location": "Lyon, France",
                 "score": 12.0,
                 "category": CAT_FPGA,
                 "job_url": "https://example.com/fpga",
             },
             {
-                "title": "RISC-V Core Verifier",
+                "title": "RISC-V Core Verifier (Toronto)",
                 "company": "Tenstorrent",
+                "location": "Toronto, ON, Canada",
                 "score": 25.0,
                 "category": CAT_RISCV,
-                "job_url": "https://example.com/riscv",
+                "job_url": "https://example.com/riscv-to",
+            },
+            {
+                "title": "RISC-V Core Verifier (Mississauga)",
+                "company": "Tenstorrent",
+                "location": "Mississauga, ON",  # no country name -> city fallback
+                "score": 18.0,
+                "category": CAT_RISCV,
+                "job_url": "https://example.com/riscv-miss",
             },
             {
                 "title": "ASIC Verification Engineer",
                 "company": "Qualcomm",
+                "location": "Barcelona, Spain",
                 "score": 15.0,
                 "category": CAT_ASIC_UVM,
                 "job_url": "https://example.com/asic",
@@ -347,15 +360,38 @@ class TestReporter(unittest.TestCase):
         with open(self.md_path, mode="r", encoding="utf-8") as f:
             content = f.read()
 
-        # RISC-V section must appear before ASIC DV, which must appear before FPGA
-        idx_riscv = content.find(f"## {CAT_RISCV}")
-        idx_asic = content.find(f"## {CAT_ASIC_UVM}")
-        idx_fpga = content.find(f"## {CAT_FPGA}")
+        # Country sections must appear in target-market priority order: Canada, France, Spain
+        idx_canada = content.find("## Canada")
+        idx_france = content.find("## France")
+        idx_spain = content.find("## Spain")
 
-        self.assertNotEqual(idx_riscv, -1)
-        self.assertNotEqual(idx_asic, -1)
-        self.assertNotEqual(idx_fpga, -1)
-        self.assertTrue(idx_riscv < idx_asic < idx_fpga)
+        self.assertNotEqual(idx_canada, -1)
+        self.assertNotEqual(idx_france, -1)
+        self.assertNotEqual(idx_spain, -1)
+        self.assertTrue(idx_canada < idx_france < idx_spain)
+
+        # Within Canada, the higher-scoring Toronto posting must appear before Mississauga
+        idx_toronto_job = content.find("RISC-V Core Verifier (Toronto)")
+        idx_mississauga_job = content.find("RISC-V Core Verifier (Mississauga)")
+        self.assertTrue(idx_canada < idx_toronto_job < idx_mississauga_job)
+
+    def test_extract_country_from_explicit_name(self):
+        """Verify country extraction when the location string names the country directly."""
+        self.assertEqual(extract_country("Paris, France"), "France")
+        self.assertEqual(extract_country("Geneva, Switzerland"), "Switzerland")
+        self.assertEqual(extract_country("Barcelona, Spain"), "Spain")
+
+    def test_extract_country_fallback_to_known_city(self):
+        """Verify country extraction falls back to known target cities when the
+        location string omits the country name."""
+        self.assertEqual(extract_country("Mississauga, ON"), "Canada")
+        self.assertEqual(extract_country("Eindhoven"), "Netherlands")
+
+    def test_extract_country_remote_and_unknown(self):
+        """Verify Remote and unrecognized locations are bucketed sensibly."""
+        self.assertEqual(extract_country("Remote"), "Remote")
+        self.assertEqual(extract_country("Austin, TX"), "Other / Unspecified")
+        self.assertEqual(extract_country(""), "Other / Unspecified")
 
 
 class TestScraperConfig(unittest.TestCase):
