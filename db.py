@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     category TEXT,
     matched_keywords TEXT,
     raw_description TEXT,
+    min_amount REAL,
+    max_amount REAL,
+    currency TEXT,
+    salary_interval TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -37,6 +41,15 @@ CREATE INDEX IF NOT EXISTS idx_jobs_job_url ON jobs(job_url);
 CREATE INDEX IF NOT EXISTS idx_jobs_category ON jobs(category);
 CREATE INDEX IF NOT EXISTS idx_jobs_score ON jobs(score DESC);
 """
+
+# Columns added after the initial schema - applied via ALTER TABLE for databases that
+# already exist on disk, since CREATE TABLE IF NOT EXISTS is a no-op on those.
+_MIGRATION_COLUMNS: dict[str, str] = {
+    "min_amount": "REAL",
+    "max_amount": "REAL",
+    "currency": "TEXT",
+    "salary_interval": "TEXT",
+}
 
 
 class JobDatabase:
@@ -62,10 +75,20 @@ class JobDatabase:
             conn.close()
 
     def init_db(self) -> None:
-        """Initialize database tables and indexes if they do not exist."""
+        """Initialize database tables and indexes if they do not exist, then apply
+        any column migrations needed by a pre-existing database file."""
         with self.get_connection() as conn:
             conn.executescript(CREATE_TABLES_SQL)
+            self._apply_migrations(conn)
         logger.debug("Database initialized at %s", self.db_path)
+
+    def _apply_migrations(self, conn: sqlite3.Connection) -> None:
+        """Add any columns from _MIGRATION_COLUMNS missing from an existing jobs table."""
+        existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        for column, sql_type in _MIGRATION_COLUMNS.items():
+            if column not in existing_columns:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {sql_type}")
+                logger.info("Migrated database '%s': added column '%s'", self.db_path, column)
 
     def get_existing_urls(self) -> set[str]:
         """Fetch all stored job URLs for fast O(1) in-memory deduplication."""
@@ -95,11 +118,13 @@ class JobDatabase:
         INSERT OR IGNORE INTO jobs (
             platform, job_url, title, company, location,
             is_remote, date_posted, score, category,
-            matched_keywords, raw_description
+            matched_keywords, raw_description,
+            min_amount, max_amount, currency, salary_interval
         ) VALUES (
             :platform, :job_url, :title, :company, :location,
             :is_remote, :date_posted, :score, :category,
-            :matched_keywords, :raw_description
+            :matched_keywords, :raw_description,
+            :min_amount, :max_amount, :currency, :salary_interval
         )
         """
         is_remote_val = 1 if job_data.get("is_remote") else 0
@@ -120,6 +145,10 @@ class JobDatabase:
             "category": str(job_data.get("category") or ""),
             "matched_keywords": matched_kw,
             "raw_description": str(job_data.get("raw_description") or job_data.get("description") or ""),
+            "min_amount": job_data.get("min_amount"),
+            "max_amount": job_data.get("max_amount"),
+            "currency": job_data.get("currency"),
+            "salary_interval": job_data.get("salary_interval"),
         }
 
         if not params["job_url"]:
@@ -148,11 +177,13 @@ class JobDatabase:
             INSERT OR IGNORE INTO jobs (
                 platform, job_url, title, company, location,
                 is_remote, date_posted, score, category,
-                matched_keywords, raw_description
+                matched_keywords, raw_description,
+                min_amount, max_amount, currency, salary_interval
             ) VALUES (
                 :platform, :job_url, :title, :company, :location,
                 :is_remote, :date_posted, :score, :category,
-                :matched_keywords, :raw_description
+                :matched_keywords, :raw_description,
+                :min_amount, :max_amount, :currency, :salary_interval
             )
             """
             for job in jobs:
@@ -178,6 +209,10 @@ class JobDatabase:
                     "category": str(job.get("category") or ""),
                     "matched_keywords": matched_kw,
                     "raw_description": str(job.get("raw_description") or job.get("description") or ""),
+                    "min_amount": job.get("min_amount"),
+                    "max_amount": job.get("max_amount"),
+                    "currency": job.get("currency"),
+                    "salary_interval": job.get("salary_interval"),
                 }
                 cursor.execute(insert_sql, params)
                 if cursor.rowcount > 0:
@@ -190,7 +225,8 @@ class JobDatabase:
         """Retrieve all curated jobs sorted descending by score."""
         query = """
         SELECT id, platform, job_url, title, company, location,
-               is_remote, date_posted, score, category, matched_keywords, raw_description
+               is_remote, date_posted, score, category, matched_keywords, raw_description,
+               min_amount, max_amount, currency, salary_interval
         FROM jobs
         ORDER BY score DESC, id DESC
         """

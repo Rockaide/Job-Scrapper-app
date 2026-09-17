@@ -15,6 +15,7 @@ from typing import Any, Optional
 from db import JobDatabase
 from demo_data import SAMPLE_JOBS
 from filter import (
+    DEFAULT_MAX_YEARS_REQUIRED,
     DEFAULT_MIN_SCORE,
     evaluate_job,
 )
@@ -162,6 +163,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--include-high-experience",
+        action="store_true",
+        default=False,
+        help=(
+            "Include postings whose description states a years-of-experience floor at "
+            "or above --max-years-required, even without a Senior-type title "
+            "(excluded by default)"
+        ),
+    )
+    parser.add_argument(
+        "--max-years-required",
+        type=int,
+        default=DEFAULT_MAX_YEARS_REQUIRED,
+        help="Postings requiring at least this many years of experience are excluded by default",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -170,6 +187,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _clean_numeric(value: Any) -> Optional[float]:
+    """Normalize a scraped numeric field to a plain float or None.
+
+    pandas.DataFrame.to_dict() turns a missing value into float('nan') rather than
+    None; NaN is falsy-looking but is actually truthy in Python, so it must be
+    checked explicitly (the `value != value` trick is the NaN-only case).
+    """
+    if value is None:
+        return None
+    if isinstance(value, float) and value != value:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _clean_optional_str(value: Any) -> Optional[str]:
+    """Normalize a scraped text field to a plain string or None (see _clean_numeric)."""
+    if value is None:
+        return None
+    if isinstance(value, float) and value != value:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def process_item(
@@ -204,6 +248,8 @@ def process_item(
         min_score=args.min_score,
         exclude_senior_titles=not args.include_senior,
         exclude_citizenship_restricted=not args.include_restricted,
+        exclude_high_experience=not args.include_high_experience,
+        max_years_required=args.max_years_required,
     )
 
     if not evaluation.passed:
@@ -213,6 +259,8 @@ def process_item(
             metrics.record_citizenship_exclusion(evaluation.matched_exclusion)
         elif evaluation.rejection_reason == "SENIORITY_MISMATCH":
             metrics.record_seniority_mismatch()
+        elif evaluation.rejection_reason == "EXPERIENCE_MISMATCH":
+            metrics.record_experience_mismatch(evaluation.matched_exclusion)
         else:
             # Discarded due to missing core DV/RISC-V keyword or low score
             metrics.record_low_score()
@@ -233,6 +281,10 @@ def process_item(
         "category": evaluation.category,
         "matched_keywords": evaluation.matched_keywords,
         "raw_description": description,
+        "min_amount": _clean_numeric(item.get("min_amount")),
+        "max_amount": _clean_numeric(item.get("max_amount")),
+        "currency": _clean_optional_str(item.get("currency")),
+        "salary_interval": _clean_optional_str(item.get("interval")),
     }
 
 

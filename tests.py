@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import os
 import shutil
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ from filter import (
     WORK_AUTH_EXCLUSIONS_LIST,
     classify_seniority,
     evaluate_job,
+    extract_years_required,
 )
 from reporter import (
     CATEGORY_ORDER,
@@ -28,6 +30,7 @@ from reporter import (
     export_to_markdown,
     extract_country,
     extract_requirements,
+    format_salary,
 )
 from scraper import DEFAULT_QUERY_ROTATION, ScraperConfig
 
@@ -208,6 +211,58 @@ class TestFilterEngine(unittest.TestCase):
         )
         self.assertTrue(res.passed)
 
+    def test_extract_years_required_basic_phrasings(self):
+        """Verify years-of-experience extraction across common phrasings."""
+        self.assertEqual(extract_years_required("5+ years of experience required."), 5)
+        self.assertEqual(extract_years_required("3-5 years of relevant experience."), 3)
+        self.assertEqual(extract_years_required("3 to 5 years of experience."), 3)
+        self.assertEqual(extract_years_required("Minimum of 5 years experience."), 5)
+        self.assertEqual(extract_years_required("At least 8 years of professional experience."), 8)
+
+    def test_extract_years_required_takes_highest_mention(self):
+        """Verify the highest stated experience floor wins when several are mentioned."""
+        text = "2+ years of Python experience. 6+ years of RTL design experience required."
+        self.assertEqual(extract_years_required(text), 6)
+
+    def test_extract_years_required_avoids_unrelated_year_mentions(self):
+        """Verify plain 'N years' mentions unrelated to experience are not matched."""
+        self.assertIsNone(extract_years_required("We've been in business for 10+ years."))
+        self.assertIsNone(extract_years_required("Supporting this product line for 15 years."))
+        self.assertIsNone(extract_years_required(""))
+        self.assertIsNone(extract_years_required(None))
+
+    def test_exclude_high_experience_drops_postings_at_threshold(self):
+        """Verify exclude_high_experience=True rejects postings requiring >= max_years_required."""
+        res = evaluate_job(
+            title="DV Engineer",
+            description="RISC-V, UVM, SystemVerilog. 5+ years of experience required.",
+            exclude_high_experience=True,
+            max_years_required=5,
+        )
+        self.assertFalse(res.passed)
+        self.assertEqual(res.rejection_reason, "EXPERIENCE_MISMATCH")
+        self.assertEqual(res.years_required, 5)
+
+    def test_exclude_high_experience_admits_postings_below_threshold(self):
+        """Verify a posting requiring fewer years than the threshold still passes."""
+        res = evaluate_job(
+            title="DV Engineer",
+            description="RISC-V, UVM, SystemVerilog. 2+ years of experience preferred.",
+            exclude_high_experience=True,
+            max_years_required=5,
+        )
+        self.assertTrue(res.passed)
+        self.assertEqual(res.years_required, 2)
+
+    def test_exclude_high_experience_off_by_default(self):
+        """Verify default behavior (exclude_high_experience=False) still admits these postings."""
+        res = evaluate_job(
+            title="DV Engineer",
+            description="RISC-V, UVM, SystemVerilog. 10+ years of experience required.",
+        )
+        self.assertTrue(res.passed)
+        self.assertEqual(res.years_required, 10)
+
 
 class TestDatabasePersistence(unittest.TestCase):
     """Tests for SQLite persistence, schema, and deduplication."""
@@ -274,6 +329,69 @@ class TestDatabasePersistence(unittest.TestCase):
         self.assertEqual(inserted, 5)
         self.assertEqual(self.db.count_jobs(), 5)
 
+    def test_save_job_round_trips_salary_fields(self):
+        """Verify salary/compensation fields are persisted and read back correctly."""
+        job = {
+            "job_url": "https://linkedin.com/jobs/view/555",
+            "title": "DV Engineer",
+            "score": 10.0,
+            "min_amount": 90000.0,
+            "max_amount": 110000.0,
+            "currency": "CAD",
+            "salary_interval": "yearly",
+        }
+        self.assertTrue(self.db.save_job(job))
+        stored = self.db.get_all_curated_jobs()[0]
+        self.assertEqual(stored["min_amount"], 90000.0)
+        self.assertEqual(stored["max_amount"], 110000.0)
+        self.assertEqual(stored["currency"], "CAD")
+        self.assertEqual(stored["salary_interval"], "yearly")
+
+    def test_migration_adds_salary_columns_to_preexisting_database(self):
+        """Verify a database created under the old schema (no salary columns) gets
+        migrated safely, without losing existing data, when opened by JobDatabase."""
+        legacy_db_path = Path(self.test_dir) / "legacy.db"
+        conn = sqlite3.connect(str(legacy_db_path))
+        conn.execute(
+            """
+            CREATE TABLE jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT,
+                job_url TEXT UNIQUE NOT NULL,
+                title TEXT,
+                company TEXT,
+                location TEXT,
+                is_remote INTEGER DEFAULT 0,
+                date_posted TEXT,
+                score REAL,
+                category TEXT,
+                matched_keywords TEXT,
+                raw_description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO jobs (platform, job_url, title, score) VALUES (?, ?, ?, ?)",
+            ("linkedin", "https://linkedin.com/jobs/view/111", "Legacy DV Engineer", 12.0),
+        )
+        conn.commit()
+        conn.close()
+
+        migrated_db = JobDatabase(legacy_db_path)
+        with migrated_db.get_connection() as conn:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        self.assertIn("min_amount", cols)
+        self.assertIn("max_amount", cols)
+        self.assertIn("currency", cols)
+        self.assertIn("salary_interval", cols)
+
+        # Pre-existing row must survive the migration untouched
+        self.assertEqual(migrated_db.count_jobs(), 1)
+        stored = migrated_db.get_all_curated_jobs()[0]
+        self.assertEqual(stored["title"], "Legacy DV Engineer")
+        self.assertIsNone(stored["min_amount"])
+
 
 class TestReporter(unittest.TestCase):
     """Tests for CSV and Markdown reporting."""
@@ -298,26 +416,39 @@ class TestReporter(unittest.TestCase):
                 "category": CAT_RISCV,
                 "matched_keywords": ["risc-v", "spike", "uvm"],
                 "job_url": "https://linkedin.com/jobs/view/777",
-            }
+                "min_amount": 120000,
+                "max_amount": 150000,
+                "currency": "USD",
+                "salary_interval": "yearly",
+            },
+            {
+                "title": "DV Engineer",
+                "company": "NoSalaryCorp",
+                "job_url": "https://linkedin.com/jobs/view/778",
+                "score": 10.0,
+                "category": CAT_RISCV,
+            },
         ]
         export_to_csv(jobs, self.csv_path)
 
         with open(self.csv_path, mode="r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             expected_headers = [
-                "Title", "Company", "Location", "Remote",
+                "Title", "Company", "Location", "Remote", "Salary",
                 "Score", "Category", "Matched Keywords", "URL"
             ]
             self.assertEqual(reader.fieldnames, expected_headers)
             rows = list(reader)
-            self.assertEqual(len(rows), 1)
+            self.assertEqual(len(rows), 2)
             row = rows[0]
             self.assertEqual(row["Title"], "RISC-V DV Lead")
             self.assertEqual(row["Company"], "SiFive")
             self.assertEqual(row["Remote"], "Yes")
+            self.assertEqual(row["Salary"], "USD 120,000 - 150,000/yr")
             self.assertEqual(row["Score"], "18.0")
             self.assertEqual(row["Category"], CAT_RISCV)
             self.assertIn("risc-v", row["Matched Keywords"])
+            self.assertEqual(rows[1]["Salary"], "")
 
     def test_export_to_markdown_country_grouping_and_ordering(self):
         """Verify Markdown groups jobs by country (target-market order) and sorts
@@ -447,6 +578,31 @@ About Us: we are a fast-growing startup.
         self.assertEqual(len(result), 3)
         for item in result:
             self.assertLessEqual(len(item), 23)  # 20 chars + "..."
+
+    def test_format_salary_full_range(self):
+        """Verify a full min/max salary range formats correctly."""
+        job = {"min_amount": 120000, "max_amount": 150000, "currency": "USD", "salary_interval": "yearly"}
+        self.assertEqual(format_salary(job), "USD 120,000 - 150,000/yr")
+
+    def test_format_salary_min_only(self):
+        """Verify a min-only salary is presented as a floor."""
+        job = {"min_amount": 90000, "currency": "CAD", "salary_interval": "yearly"}
+        self.assertEqual(format_salary(job), "CAD 90,000+/yr")
+
+    def test_format_salary_max_only(self):
+        """Verify a max-only salary is presented as a cap."""
+        job = {"max_amount": 60000, "currency": "EUR", "salary_interval": "yearly"}
+        self.assertEqual(format_salary(job), "Up to EUR 60,000/yr")
+
+    def test_format_salary_hourly_uses_decimals(self):
+        """Verify hourly rates render with two decimal places."""
+        job = {"min_amount": 45.5, "max_amount": 60, "currency": "USD", "salary_interval": "hourly"}
+        self.assertEqual(format_salary(job), "USD 45.50 - 60.00/hr")
+
+    def test_format_salary_missing_returns_empty(self):
+        """Verify no salary data yields an empty string, not a placeholder."""
+        self.assertEqual(format_salary({}), "")
+        self.assertEqual(format_salary({"min_amount": None, "max_amount": None}), "")
 
 
 class TestScraperConfig(unittest.TestCase):

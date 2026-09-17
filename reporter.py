@@ -95,6 +95,39 @@ def extract_country(location: str) -> str:
     return "Other / Unspecified"
 
 
+_INTERVAL_LABELS: dict[str, str] = {
+    "yearly": "yr",
+    "monthly": "mo",
+    "weekly": "wk",
+    "daily": "day",
+    "hourly": "hr",
+}
+
+
+def format_salary(job: dict[str, Any]) -> str:
+    """Format a human-readable salary range from jobspy's compensation fields
+    (min_amount/max_amount/currency/salary_interval), or '' if the platform
+    didn't provide salary data for this posting."""
+    min_amount = job.get("min_amount")
+    max_amount = job.get("max_amount")
+    if not min_amount and not max_amount:
+        return ""
+
+    currency = str(job.get("currency") or "USD").strip()
+    interval = str(job.get("salary_interval") or job.get("interval") or "yearly").strip().lower()
+    label = _INTERVAL_LABELS.get(interval, interval)
+    decimals = 2 if interval == "hourly" else 0
+
+    def _fmt(amount: Any) -> str:
+        return f"{float(amount):,.{decimals}f}"
+
+    if min_amount and max_amount:
+        return f"{currency} {_fmt(min_amount)} - {_fmt(max_amount)}/{label}"
+    if min_amount:
+        return f"{currency} {_fmt(min_amount)}+/{label}"
+    return f"Up to {currency} {_fmt(max_amount)}/{label}"
+
+
 @dataclass
 class PipelineMetrics:
     """Tracks metrics across each stage of the scraping and filtering pipeline."""
@@ -104,6 +137,7 @@ class PipelineMetrics:
     dropped_by_hard_exclusions: int = 0
     dropped_by_citizenship: int = 0
     dropped_by_seniority: int = 0
+    dropped_by_experience: int = 0
     dropped_by_low_score: int = 0
     successfully_curated: int = 0
     category_counts: dict[str, int] = field(default_factory=dict)
@@ -124,6 +158,11 @@ class PipelineMetrics:
 
     def record_seniority_mismatch(self) -> None:
         self.dropped_by_seniority += 1
+
+    def record_experience_mismatch(self, keyword: Optional[str] = None) -> None:
+        self.dropped_by_experience += 1
+        if keyword:
+            self.exclusion_breakdown[keyword] = self.exclusion_breakdown.get(keyword, 0) + 1
 
     def record_low_score(self) -> None:
         self.dropped_by_low_score += 1
@@ -147,7 +186,7 @@ def generate_filenames(output_dir: str | Path = ".", date_str: Optional[str] = N
 def export_to_csv(jobs: list[dict[str, Any]], target_file: Path | str) -> Path:
     """Export curated jobs to structured CSV.
 
-    Columns: Title, Company, Location, Remote, Score, Category, Matched Keywords, URL.
+    Columns: Title, Company, Location, Remote, Salary, Score, Category, Matched Keywords, URL.
     """
     path = Path(target_file)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -157,6 +196,7 @@ def export_to_csv(jobs: list[dict[str, Any]], target_file: Path | str) -> Path:
         "Company",
         "Location",
         "Remote",
+        "Salary",
         "Score",
         "Category",
         "Matched Keywords",
@@ -189,6 +229,7 @@ def export_to_csv(jobs: list[dict[str, Any]], target_file: Path | str) -> Path:
                 "Company": str(job.get("company") or "").strip(),
                 "Location": str(job.get("location") or "").strip(),
                 "Remote": remote_str,
+                "Salary": format_salary(job),
                 "Score": f"{float(job.get('score', 0.0)):.1f}",
                 "Category": str(job.get("category") or "").strip(),
                 "Matched Keywords": kw_str,
@@ -399,11 +440,16 @@ def export_to_markdown(jobs: list[dict[str, Any]], target_file: Path | str) -> P
 
             raw_desc = job.get("raw_description") or job.get("description") or ""
             requirements = extract_requirements(raw_desc)
+            salary = format_salary(job)
 
             lines.append(f"### {idx}. [{title}]({url})")
-            lines.append(
-                f"- **Company:** {company} | **Location:** {location} | **Remote:** {remote_str} | **Score:** **{score:.1f}**"
+            company_line = (
+                f"- **Company:** {company} | **Location:** {location} | "
+                f"**Remote:** {remote_str} | **Score:** **{score:.1f}**"
             )
+            if salary:
+                company_line += f" | **Salary:** {salary}"
+            lines.append(company_line)
             lines.append(
                 f"- **Category:** {category} | **Platform:** {platform} | **Posted:** {date_posted}"
             )
@@ -467,9 +513,10 @@ def print_terminal_funnel(
     print(f"  [3] Dropped by Hard Exclusions:        {metrics.dropped_by_hard_exclusions:>5}  (QA/Web/Clinical non-hardware)")
     print(f"  [4] Dropped by Citizenship/Sponsorship:{metrics.dropped_by_citizenship:>5}  (Clearance/citizenship/no-sponsorship)")
     print(f"  [5] Dropped by Seniority Mismatch:     {metrics.dropped_by_seniority:>5}  (Senior/Staff/Principal/Lead titles)")
-    print(f"  [6] Dropped by Low Score:              {metrics.dropped_by_low_score:>5}  (Below threshold or off-domain)")
+    print(f"  [6] Dropped by Experience Mismatch:    {metrics.dropped_by_experience:>5}  (Requires 5+ years by default)")
+    print(f"  [7] Dropped by Low Score:              {metrics.dropped_by_low_score:>5}  (Below threshold or off-domain)")
     print(sep_single)
-    print(f"  [7] Successfully Curated:              {metrics.successfully_curated:>5}")
+    print(f"  [8] Successfully Curated:              {metrics.successfully_curated:>5}")
     print(sep_double)
 
     # Funnel Flow Summary

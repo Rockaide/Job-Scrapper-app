@@ -28,6 +28,10 @@ WEIGHT_GENERAL = 2
 # Minimum score required by default
 DEFAULT_MIN_SCORE = 8
 
+# Postings requiring at least this many years of experience are excluded by default
+# (candidate has under a year of professional experience)
+DEFAULT_MAX_YEARS_REQUIRED = 5
+
 # 1. Hard Exclusions (Discard immediately if matched)
 HARD_EXCLUSIONS_LIST = [
     "selenium",
@@ -272,6 +276,34 @@ def classify_seniority(title: Optional[str]) -> str:
     return "Unspecified"
 
 
+# Matches phrases like "5+ years of experience", "3-5 years of relevant experience",
+# "5 years experience", "6+ years of RTL design experience". Requires an explicit tie
+# to "experience" (allowing up to 3 words in between, e.g. a domain qualifier) to
+# avoid false positives like "10+ years in business" (company history, not a role
+# requirement).
+YEARS_EXPERIENCE_PATTERN = re.compile(
+    r"\b(\d{1,2})\s*(?:\+|-|to)?\s*\d{0,2}\+?\s*years?\b"
+    r"(?:\s+of)?(?:\s+[a-z][a-z-]*){0,3}\s+(?:experience|exp\.)",
+    re.IGNORECASE,
+)
+
+
+def extract_years_required(text: Optional[str]) -> Optional[int]:
+    """Best-effort extraction of the highest years-of-experience floor stated in a job
+    description (e.g. "5+ years of experience" -> 5; for a range like "3-5 years of
+    experience" the lower/minimum bound, 3, is used - that's the actual eligibility
+    floor, the upper end is just aspirational). When a posting states multiple distinct
+    experience requirements, the highest one is used, since that's the real gate.
+    Returns None if no such phrase is found.
+    """
+    if not text:
+        return None
+    matches = YEARS_EXPERIENCE_PATTERN.findall(text)
+    if not matches:
+        return None
+    return max(int(m) for m in matches)
+
+
 class FilterResult(BaseModel):
     """Detailed evaluation result of filtering and scoring a job listing."""
 
@@ -284,6 +316,7 @@ class FilterResult(BaseModel):
     category_scores: dict[str, float] = Field(default_factory=dict)
     matched_by_category: dict[str, list[str]] = Field(default_factory=dict)
     seniority: str = "Unspecified"
+    years_required: Optional[int] = None
 
 
 def normalize_text(text: Optional[str]) -> str:
@@ -301,6 +334,8 @@ def evaluate_job(
     min_score: float = DEFAULT_MIN_SCORE,
     exclude_senior_titles: bool = False,
     exclude_citizenship_restricted: bool = False,
+    exclude_high_experience: bool = False,
+    max_years_required: int = DEFAULT_MAX_YEARS_REQUIRED,
 ) -> FilterResult:
     """Evaluate a job listing against verification criteria and assign weighted scores.
 
@@ -309,19 +344,23 @@ def evaluate_job(
     2. If exclude_citizenship_restricted, discard postings requiring citizenship,
        security clearance, or explicitly offering no visa sponsorship.
     3. If exclude_senior_titles, discard titles classified as Senior+.
-    4. Extract keywords from normalized title and description.
-    5. Verify at least one keyword matches Core RISC-V, Standard Hardware DV,
+    4. If exclude_high_experience, discard postings whose description states a
+       years-of-experience floor at or above max_years_required (catches postings
+       that require senior-level tenure without using a Senior-type title).
+    5. Extract keywords from normalized title and description.
+    6. Verify at least one keyword matches Core RISC-V, Standard Hardware DV,
        or General Digital/Hardware Design.
-    6. Compute composite score:
+    7. Compute composite score:
        (Core RISC-V: +5 each, Standard DV: +3 each, FPGA/Accelerator: +2 each,
         General Digital/Hardware Design: +2 each).
-    7. Verify score >= min_score.
-    8. Tag surviving job with primary domain category.
+    8. Verify score >= min_score.
+    9. Tag surviving job with primary domain category.
     """
     norm_title = normalize_text(title)
     norm_desc = normalize_text(description)
     combined_text = f"{norm_title}\n{norm_desc}"
     seniority = classify_seniority(norm_title)
+    years_required = extract_years_required(combined_text)
 
     # Step 1: Check Hard Exclusions
     for kw, pattern in HARD_EXCLUSION_PATTERNS.items():
@@ -332,6 +371,7 @@ def evaluate_job(
                 rejection_reason="HARD_EXCLUSION",
                 matched_exclusion=kw,
                 seniority=seniority,
+                years_required=years_required,
             )
 
     # Step 2: Citizenship/work-authorization gate (opt-in; e.g. main.py excludes by default)
@@ -344,6 +384,7 @@ def evaluate_job(
                     rejection_reason="CITIZENSHIP_RESTRICTED",
                     matched_exclusion=kw,
                     seniority=seniority,
+                    years_required=years_required,
                 )
 
     # Step 3: Seniority gate (opt-in; e.g. main.py excludes Senior+ by default)
@@ -353,9 +394,30 @@ def evaluate_job(
             passed=False,
             rejection_reason="SENIORITY_MISMATCH",
             seniority=seniority,
+            years_required=years_required,
         )
 
-    # Step 4: Match domain categories
+    # Step 4: Years-of-experience gate (opt-in; e.g. main.py excludes by default)
+    if (
+        exclude_high_experience
+        and years_required is not None
+        and years_required >= max_years_required
+    ):
+        logger.debug(
+            "Job '%s' dropped: requires %d+ years experience (threshold %d)",
+            title,
+            years_required,
+            max_years_required,
+        )
+        return FilterResult(
+            passed=False,
+            rejection_reason="EXPERIENCE_MISMATCH",
+            matched_exclusion=f"{years_required}+ years experience",
+            seniority=seniority,
+            years_required=years_required,
+        )
+
+    # Step 5: Match domain categories
     matched_riscv = [
         kw for kw, pat in RISCV_PATTERNS.items() if pat.search(combined_text)
     ]
@@ -371,7 +433,7 @@ def evaluate_job(
 
     all_matched = matched_riscv + matched_dv + matched_fpga + matched_general
 
-    # Step 5: MUST match at least one keyword from Core RISC-V, Standard Hardware
+    # Step 6: MUST match at least one keyword from Core RISC-V, Standard Hardware
     # DV, or General Digital/Hardware Design (FPGA/Accelerator alone is not enough).
     if not matched_riscv and not matched_dv and not matched_general:
         logger.debug(
@@ -384,9 +446,10 @@ def evaluate_job(
             rejection_reason="NO_CORE_DV_OR_RISCV_KEYWORD",
             matched_keywords=all_matched,
             seniority=seniority,
+            years_required=years_required,
         )
 
-    # Step 6: Calculate weighted composite score
+    # Step 7: Calculate weighted composite score
     score_riscv = len(matched_riscv) * WEIGHT_RISCV
     score_dv = len(matched_dv) * WEIGHT_DV
     score_fpga = len(matched_fpga) * WEIGHT_FPGA
@@ -407,7 +470,7 @@ def evaluate_job(
         CAT_GENERAL: matched_general,
     }
 
-    # Step 7: Check min_score threshold
+    # Step 8: Check min_score threshold
     if total_score < min_score:
         logger.debug(
             "Job '%s' dropped: score %.1f < threshold %.1f",
@@ -423,9 +486,10 @@ def evaluate_job(
             category_scores=category_scores,
             matched_by_category=matched_by_category,
             seniority=seniority,
+            years_required=years_required,
         )
 
-    # Step 8: Primary Domain Categorization
+    # Step 9: Primary Domain Categorization
     # Prioritization:
     # 1. RISC-V / Processor DV: if RISC-V keywords matched and either
     #    title contains RISC-V/CPU or RISC-V score dominates the rest.
@@ -463,4 +527,5 @@ def evaluate_job(
         category_scores=category_scores,
         matched_by_category=matched_by_category,
         seniority=seniority,
+        years_required=years_required,
     )

@@ -15,10 +15,11 @@ The pipeline runs as one streaming pass, printing each match live instead of wai
 3. **Filter & score** — `filter.py` evaluates the title + description against several gates, in order:
    - **Hard exclusions**: discard immediately if it matches unrelated-domain keywords (Selenium/Cypress/React/manual QA/clinical validation/etc.).
    - **Citizenship / work-authorization exclusion** (opt-out, on by default): discard if it requires citizenship, a security clearance, ITAR/US-person status, or explicitly offers no visa sponsorship.
-   - **Seniority exclusion** (opt-out, on by default): discard if the title reads Senior/Staff/Principal/Director/Lead/Manager/Chief.
+   - **Seniority exclusion** (opt-out, on by default): discard if the *title* reads Senior/Staff/Principal/Director/Lead/Manager/Chief.
+   - **Years-of-experience exclusion** (opt-out, on by default): discard if the *description* states a years-of-experience floor at or above `--max-years-required` (default 5) - catches postings that require senior-level tenure without using a Senior-type title.
    - **Keyword scoring**: weighted match against four keyword categories (see below); must hit at least one of RISC-V, Standard DV, or General Digital/Hardware Design to be eligible at all.
    - **Minimum score threshold** (`--min-score`, default `8.0`).
-4. **Curate** — a listing that survives all of the above is printed immediately to the terminal, saved to `jobs.db`, and added to this run's report.
+4. **Curate** — a listing that survives all of the above is printed immediately to the terminal, saved to `jobs.db` (including salary/compensation fields when the platform provided them), and added to this run's report.
 5. **Report** — once the run ends (or is interrupted with `Ctrl+C` — whatever was curated so far is still exported, nothing is lost), `reporter.py` writes `curated_jobs_YYYY-MM-DD.csv` and `.md`, plus a terminal funnel summary showing how many listings were dropped at each stage.
 
 ---
@@ -51,6 +52,7 @@ As configured today, a default run (`python main.py`, no flags):
 - **Posting age window**: last 2 weeks / 336 hours (`--hours-old`).
 - **Seniority filter**: Senior+ titles excluded (`--include-senior` to disable).
 - **Citizenship/sponsorship filter**: restricted postings excluded (`--include-restricted` to disable).
+- **Years-of-experience filter**: postings requiring 5+ years excluded (`--include-high-experience` to disable, `--max-years-required` to change the threshold).
 - **Minimum score**: 8.0 (`--min-score`).
 
 ### Domain Keyword Categories & Weights
@@ -69,6 +71,9 @@ A curated posting must match at least one keyword from RISC-V, Standard DV, or G
 
 ### Seniority Exclusions
 Titles containing `senior`, `sr.`, `staff`, `principal`, `distinguished`, `director`, `lead`, `head of`, `vp`, `manager`, `chief` are treated as Senior+ and excluded by default.
+
+### Years-of-Experience Exclusions
+`extract_years_required()` in `filter.py` scans the description for phrases like "5+ years of experience", "3-5 years of relevant experience", or "6+ years of RTL design experience" (requires an explicit tie to the word "experience"/"exp." to avoid false positives like "10+ years in business"). When a posting states several different experience requirements, the highest one is used, since that's the real gate. Postings at or above `--max-years-required` (default `5`) are excluded by default - this exists because the seniority filter above only reads the *title*, so a posting plainly titled "DV Engineer" that requires "8+ years" in the body would otherwise slip through untouched.
 
 ---
 
@@ -101,8 +106,11 @@ python main.py --location "Remote" --is-remote
 # Widen the conurbation search radius (miles)
 python main.py --distance 75
 
-# Include Senior+ titles and/or citizenship/clearance/no-sponsorship postings
-python main.py --include-senior --include-restricted
+# Include Senior+ titles, citizenship/clearance/no-sponsorship postings, and/or high-experience postings
+python main.py --include-senior --include-restricted --include-high-experience
+
+# Raise the years-of-experience threshold instead of disabling the filter outright
+python main.py --max-years-required 7
 
 # Run the test suite
 python -m unittest tests.py -v
@@ -123,6 +131,8 @@ python -m unittest tests.py -v
 | `--queries` | full rotation | Comma-separated custom search terms |
 | `--include-senior` | `False` | Include Senior+ titles (excluded by default) |
 | `--include-restricted` | `False` | Include citizenship/clearance/no-sponsorship postings (excluded by default) |
+| `--include-high-experience` | `False` | Include postings requiring >= `--max-years-required` (excluded by default) |
+| `--max-years-required` | `5` | Years-of-experience floor at which a posting is excluded |
 | `--demo` | `False` | Run against offline fixture data, no scraping |
 | `--db-path` | `jobs.db` | SQLite cache/persistence path |
 | `--output-dir` | `.` | Directory for the CSV/Markdown report |
@@ -132,9 +142,9 @@ python -m unittest tests.py -v
 
 ## Generated Artifacts (not committed to git)
 
-1. **`jobs.db`** — local SQLite cache of every curated job ever seen, used for cross-run URL deduplication.
-2. **`curated_jobs_YYYY-MM-DD.csv`** — columns: `Title`, `Company`, `Location`, `Remote`, `Score`, `Category`, `Matched Keywords`, `URL`.
-3. **`curated_jobs_YYYY-MM-DD.md`** — grouped by country (Canada, France, Netherlands, Switzerland, Spain, Remote, then Other/Unspecified for anything that doesn't resolve to a target market), sorted descending by score within each country, each entry a clickable link back to the original posting and tagged with its domain category. Country is inferred from the listing's own location text (`extract_country()` in `reporter.py`) - it checks for an explicit country name first, then falls back to matching known target/satellite cities, since some platforms omit the country.
+1. **`jobs.db`** — local SQLite cache of every curated job ever seen (including salary/compensation fields when provided), used for cross-run URL deduplication. Column migrations (e.g. the salary columns) are applied automatically on startup via `ALTER TABLE`, so an existing database from an older version of this tool upgrades in place without data loss.
+2. **`curated_jobs_YYYY-MM-DD.csv`** — columns: `Title`, `Company`, `Location`, `Remote`, `Salary`, `Score`, `Category`, `Matched Keywords`, `URL`. `Salary` is blank when the platform didn't provide compensation data for that posting.
+3. **`curated_jobs_YYYY-MM-DD.md`** — grouped by country (Canada, France, Netherlands, Switzerland, Spain, Remote, then Other/Unspecified for anything that doesn't resolve to a target market), sorted descending by score within each country, each entry a clickable link back to the original posting, tagged with its domain category, and its salary range when available (`format_salary()` in `reporter.py`, from `jobspy`'s own min/max/currency/interval fields - previously captured but silently discarded). Country is inferred from the listing's own location text (`extract_country()` in `reporter.py`) - it checks for an explicit country name first, then falls back to matching known target/satellite cities, since some platforms omit the country.
 
    Each entry also shows a **Requirements** list rather than a generic first-few-sentences blurb: `extract_requirements()` scans the description for a recognized section header (`Requirements`, `Qualifications`, `What You'll Need`, `About You`, etc.), collects the bullets that follow it, and stops at the next recognized section (`Responsibilities`, `Benefits`, `About Us`, etc.). If no such section is found - some postings are unstructured prose - it falls back to the old generic excerpt under an **Overview** label instead.
-4. **Terminal output** — a `[+] CURATED ...` line printed live as each match is found, followed by a funnel summary at the end: `Total Scraped -> Excluded by URL Cache -> Dropped by Hard Exclusions -> Dropped by Citizenship/Sponsorship -> Dropped by Seniority Mismatch -> Dropped by Low Score -> Successfully Curated`.
+4. **Terminal output** — a `[+] CURATED ...` line printed live as each match is found, followed by a funnel summary at the end: `Total Scraped -> Excluded by URL Cache -> Dropped by Hard Exclusions -> Dropped by Citizenship/Sponsorship -> Dropped by Seniority Mismatch -> Dropped by Experience Mismatch -> Dropped by Low Score -> Successfully Curated`.
