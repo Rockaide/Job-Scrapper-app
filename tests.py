@@ -27,6 +27,7 @@ from reporter import (
     export_to_csv,
     export_to_markdown,
     extract_country,
+    extract_requirements,
 )
 from scraper import DEFAULT_QUERY_ROTATION, ScraperConfig
 
@@ -392,6 +393,60 @@ class TestReporter(unittest.TestCase):
         self.assertEqual(extract_country("Remote"), "Remote")
         self.assertEqual(extract_country("Austin, TX"), "Other / Unspecified")
         self.assertEqual(extract_country(""), "Other / Unspecified")
+
+    def test_extract_requirements_from_labeled_section(self):
+        """Verify requirements are pulled from a labeled section and stop at the next one."""
+        description = """
+We are seeking an experienced Senior RISC-V Core Verification Engineer.
+Key Responsibilities:
+- Architect and develop comprehensive UVM and SystemVerilog verification environments.
+- Implement step-and-compare co-simulation using Spike ISS.
+Qualifications:
+- Deep expertise in RISC-V ISA, CPU verification, and lockstep execution models.
+- Strong proficiency in UVM, SVA (SystemVerilog Assertions), and AXI interfaces.
+Benefits:
+- Competitive salary and equity.
+- Fully remote work.
+"""
+        result = extract_requirements(description)
+        self.assertEqual(
+            result,
+            [
+                "Deep expertise in RISC-V ISA, CPU verification, and lockstep execution models.",
+                "Strong proficiency in UVM, SVA (SystemVerilog Assertions), and AXI interfaces.",
+            ],
+        )
+
+    def test_extract_requirements_handles_alternate_header_names(self):
+        """Verify recognition of common header phrasing beyond the literal word 'Requirements'."""
+        description = """
+About the role: build next-gen FPGA accelerators.
+What You'll Need:
+- 2+ years of RTL design experience.
+- Familiarity with Vivado and AXI-Stream.
+About Us: we are a fast-growing startup.
+"""
+        result = extract_requirements(description)
+        self.assertEqual(
+            result,
+            ["2+ years of RTL design experience.", "Familiarity with Vivado and AXI-Stream."],
+        )
+
+    def test_extract_requirements_empty_when_no_section_found(self):
+        """Verify an unstructured posting with no recognizable section returns an empty list,
+        so callers know to fall back to a generic excerpt."""
+        description = "We build cool hardware. Come join our growing team in a fast-paced environment."
+        self.assertEqual(extract_requirements(description), [])
+        self.assertEqual(extract_requirements(""), [])
+
+    def test_extract_requirements_caps_item_count_and_length(self):
+        """Verify max_items and max_chars_per_item are respected."""
+        bullets = "\n".join(f"- Requirement number {i} that is reasonably long" for i in range(20))
+        description = f"Requirements:\n{bullets}\n"
+        result = extract_requirements(description, max_items=3, max_chars_per_item=20)
+        self.assertEqual(len(result), 3)
+        for item in result:
+            self.assertLessEqual(len(item), 23)  # 20 chars + "..."
 
 
 class TestScraperConfig(unittest.TestCase):

@@ -213,6 +213,112 @@ def _clean_excerpt(description: str, max_chars: int = 240) -> str:
     return full_text
 
 
+# Section headers that mark the start of the skills/requirements block we want to extract.
+_REQUIREMENTS_HEADER_PHRASES = {
+    "requirements", "requirement", "required qualifications", "minimum qualifications",
+    "preferred qualifications", "basic qualifications", "key requirements",
+    "qualifications", "key qualifications", "required skills", "technical skills",
+    "skills required", "desired skills", "essential skills", "what you'll need",
+    "what youll need", "what you need", "what you bring", "what we're looking for",
+    "what we are looking for", "must haves", "must have", "you have", "about you",
+    "your profile", "your background", "skills and experience", "experience required",
+}
+
+# Section headers that mark the start of a DIFFERENT block, used only to know where the
+# requirements block ends (they are not extracted themselves).
+_OTHER_SECTION_HEADER_PHRASES = {
+    "responsibilities", "key responsibilities", "duties", "what you'll do",
+    "what youll do", "what you will do", "role", "about the role", "about us",
+    "about the company", "about the team", "benefits", "perks", "compensation",
+    "salary", "how to apply", "equal opportunity", "equal employment", "diversity",
+    "why join us", "our culture", "overview", "summary", "job summary", "description",
+}
+
+
+def _normalize_header_line(line: str) -> str:
+    """Strip markdown decoration from a line, returning its bare lowercase text."""
+    stripped = re.sub(r"^#{1,6}\s*", "", line.strip())
+    stripped = stripped.strip("*_ \t")
+    return stripped.rstrip(":").strip().lower()
+
+
+def _header_kind(line: str) -> Optional[str]:
+    """Classify a line as a 'requirements' header, an 'other' section header, or
+    neither. Only short lines are considered, since real headers are brief."""
+    norm = _normalize_header_line(line)
+    if not norm or len(norm) > 40:
+        return None
+    if any(phrase in norm for phrase in _REQUIREMENTS_HEADER_PHRASES):
+        return "requirements"
+    if any(phrase in norm for phrase in _OTHER_SECTION_HEADER_PHRASES):
+        return "other"
+    return None
+
+
+def extract_requirements(
+    description: str, max_items: int = 8, max_chars_per_item: int = 200
+) -> list[str]:
+    """Extract the skills/requirements bullet points from a job description.
+
+    Scans for a recognized "Requirements"/"Qualifications"/etc. section header, then
+    collects the bullet lines that follow it, stopping at the next recognized section
+    header (e.g. "Responsibilities", "Benefits") or at max_items. Returns an empty list
+    if no such section is found - callers should fall back to a generic excerpt then,
+    since not every posting is structured this cleanly.
+    """
+    if not description:
+        return []
+
+    text = description.replace("\xa0", " ").replace("\r\n", "\n")
+    lines = text.split("\n")
+
+    start_idx = None
+    for i, line in enumerate(lines):
+        if _header_kind(line) == "requirements":
+            start_idx = i + 1
+            break
+    if start_idx is None:
+        return []
+
+    end_idx = len(lines)
+    for j in range(start_idx, len(lines)):
+        if _header_kind(lines[j]) is not None:
+            end_idx = j
+            break
+
+    chunk_lines = lines[start_idx:end_idx]
+
+    def _truncate(item: str) -> str:
+        if len(item) > max_chars_per_item:
+            return item[:max_chars_per_item].rstrip() + "..."
+        return item
+
+    bullets: list[str] = []
+    for line in chunk_lines:
+        item = re.sub(r"^[-*•●▪]+\s*", "", line.strip())
+        item = re.sub(r"^\d+[.)]\s*", "", item).strip()
+        if not item:
+            continue
+        bullets.append(_truncate(item))
+        if len(bullets) >= max_items:
+            break
+
+    # No bullet-per-line structure (a single prose paragraph) - split on sentences instead.
+    if len(bullets) <= 1 and chunk_lines:
+        blob = " ".join(line.strip() for line in chunk_lines if line.strip())
+        if blob:
+            bullets = []
+            for sentence in re.split(r"(?<=[.;])\s+", blob):
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+                bullets.append(_truncate(sentence))
+                if len(bullets) >= max_items:
+                    break
+
+    return bullets
+
+
 def export_to_markdown(jobs: list[dict[str, Any]], target_file: Path | str) -> Path:
     """Export curated jobs to formatted Markdown, grouped by country (target-market
     priority order) and sorted descending by Score within each country."""
@@ -291,7 +397,8 @@ def export_to_markdown(jobs: list[dict[str, Any]], target_file: Path | str) -> P
 
             kw_badges = " ".join(f"`{kw}`" for kw in matched_kw) if matched_kw else "`None`"
 
-            excerpt = _clean_excerpt(job.get("raw_description") or job.get("description") or "")
+            raw_desc = job.get("raw_description") or job.get("description") or ""
+            requirements = extract_requirements(raw_desc)
 
             lines.append(f"### {idx}. [{title}]({url})")
             lines.append(
@@ -301,8 +408,14 @@ def export_to_markdown(jobs: list[dict[str, Any]], target_file: Path | str) -> P
                 f"- **Category:** {category} | **Platform:** {platform} | **Posted:** {date_posted}"
             )
             lines.append(f"- **Matched Keywords:** {kw_badges}")
-            if excerpt:
-                lines.append(f"- **Overview:** {excerpt}")
+            if requirements:
+                lines.append("- **Requirements:**")
+                for req in requirements:
+                    lines.append(f"  - {req}")
+            else:
+                excerpt = _clean_excerpt(raw_desc)
+                if excerpt:
+                    lines.append(f"- **Overview:** {excerpt}")
             lines.append("")
 
         lines.append("---")
