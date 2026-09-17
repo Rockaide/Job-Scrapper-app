@@ -35,7 +35,14 @@ DEFAULT_QUERY_ROTATION: list[str] = [
     "Verification Engineer",
 ]
 
-DEFAULT_PLATFORMS: list[str] = ["linkedin", "indeed", "glassdoor", "zip_recruiter", "google"]
+# Glassdoor and ZipRecruiter are omitted by default: both are confirmed hard-blocked by
+# Cloudflare (403, served from a "Security | Glassdoor"-style challenge page) on every
+# single request, not a transient rate limit - contributing zero results while adding
+# log noise and wasted requests. Still available via --sites if that ever changes.
+DEFAULT_PLATFORMS: list[str] = ["linkedin", "indeed", "google"]
+
+# All platforms python-jobspy supports, for reference / --sites overrides.
+ALL_PLATFORMS: list[str] = ["linkedin", "indeed", "glassdoor", "zip_recruiter", "google"]
 
 # Candidate's target job markets: Canada, France, Netherlands, French-speaking
 # Switzerland, and Spain.

@@ -1,6 +1,6 @@
 # Hardware Verification & Accelerator Job Hunter
 
-A modular Python CLI that scrapes, deduplicates, filters, scores, and reports job postings across **LinkedIn**, **Indeed**, **Glassdoor**, **ZipRecruiter**, and **Google Jobs** using [`python-jobspy`](https://github.com/cullenwatson/JobSpy), then curates them against a specific candidate profile: a junior/entry-level **Digital Design & Verification Engineer** background (RISC-V core verification, UVM/SystemVerilog, FPGA-based hardware accelerators).
+A modular Python CLI that scrapes, deduplicates, filters, scores, and reports job postings across **LinkedIn**, **Indeed**, and **Google Jobs** (Glassdoor and ZipRecruiter are supported but disabled by default - see below) using [`python-jobspy`](https://github.com/cullenwatson/JobSpy), then curates them against a specific candidate profile: a junior/entry-level **Digital Design & Verification Engineer** background (RISC-V core verification, UVM/SystemVerilog, FPGA-based hardware accelerators).
 
 It exists because generic job-board recommendations (e.g. LinkedIn's own feed) are noisy — they mix in unrelated software/QA/supply-chain roles and senior-only postings the candidate isn't eligible for. This tool applies a rule-based scoring and exclusion engine instead, tuned specifically to that profile.
 
@@ -48,7 +48,7 @@ Not committed to version control (see `.gitignore`): `.venv/`, `__pycache__/`, `
 
 As configured today, a default run (`python main.py`, no flags):
 
-- **Platforms**: LinkedIn, Indeed, Glassdoor, ZipRecruiter, Google Jobs (`DEFAULT_PLATFORMS` in `scraper.py`). Glassdoor is known to be unreliable for non-US locations (`jobspy` CSRF-token bootstrap issue on `.ca`/`.fr` domains) but fails gracefully without blocking the other platforms.
+- **Platforms**: LinkedIn, Indeed, Google Jobs (`DEFAULT_PLATFORMS` in `scraper.py`). Glassdoor and ZipRecruiter are supported by `jobspy` but excluded by default - both are confirmed hard-blocked by Cloudflare (403, served from a "Security | Glassdoor"-style challenge page rather than real content) on every single request, from multiple machines/IPs, not a transient rate limit. They fail gracefully when included (don't block the other platforms), so `--sites linkedin,indeed,glassdoor,zip_recruiter,google` still works if you want to try them again later (e.g. behind a proxy) or the block lifts.
 - **Locations**: Toronto, Montreal, Ottawa, Vancouver (Canada); Paris, Lyon (France); Eindhoven, Amsterdam (Netherlands); Geneva, Lausanne (Switzerland); Barcelona (Spain) — the candidate's target job markets. Each is searched with a 50-mile radius (`--distance`) so satellite/conurbated cities (Mississauga, Hamilton, Gatineau, Laval, Longueuil, greater Île-de-France, etc.) are included without listing them individually.
 - **Queries**: 10 rotating search terms from `DEFAULT_QUERY_ROTATION` in `scraper.py`, ranging from RISC-V/CPU/ASIC/FPGA-specific titles to broader ones (`Hardware Engineer`, `Digital Design Engineer`, `Junior Verification Engineer`).
 - **Posting age window**: last 2 weeks / 336 hours (`--hours-old`).
@@ -135,7 +135,7 @@ python -m unittest tests.py -v
 | `--is-remote` | `False` | Restrict to remote-only postings |
 | `--results-wanted` | `50` | Listings requested per platform per query/location |
 | `--min-score` | `8.0` | Minimum composite score to curate a posting |
-| `--sites` | all 5 platforms | Comma-separated platforms to scrape |
+| `--sites` | `linkedin,indeed,google` | Comma-separated platforms to scrape (glassdoor, zip_recruiter also supported but excluded by default - see Current Configuration) |
 | `--queries` | full rotation | Comma-separated custom search terms |
 | `--include-senior` | `False` | Include Senior+ titles (excluded by default) |
 | `--include-restricted` | `False` | Include citizenship/clearance/no-sponsorship postings (excluded by default) |

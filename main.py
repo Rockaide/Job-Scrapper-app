@@ -134,7 +134,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--sites",
         type=str,
         default=",".join(DEFAULT_PLATFORMS),
-        help="Comma-separated platforms to scrape (linkedin,indeed,glassdoor)",
+        help=(
+            "Comma-separated platforms to scrape. Default excludes glassdoor and "
+            "zip_recruiter (both hard-blocked by Cloudflare); pass e.g. "
+            "'linkedin,indeed,glassdoor,zip_recruiter,google' to try them anyway"
+        ),
     )
     parser.add_argument(
         "--queries",
