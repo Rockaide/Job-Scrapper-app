@@ -21,6 +21,7 @@ from filter import (
 )
 from reporter import (
     PipelineMetrics,
+    collapse_duplicates,
     export_to_csv,
     export_to_markdown,
     generate_filenames,
@@ -361,13 +362,25 @@ def run_pipeline(args: argparse.Namespace) -> int:
     if not curated_jobs:
         logger.info("No newly curated jobs met the threshold during this run.")
 
-    # 5. Export Output Reports
-    csv_file, md_file = generate_filenames(output_dir=args.output_dir)
-    export_to_csv(curated_jobs, csv_file)
-    export_to_markdown(curated_jobs, md_file)
+    # 5. Collapse postings that are likely the same job cross-posted on multiple
+    # platforms (same normalized title + company + city) into one report entry.
+    report_jobs = collapse_duplicates(curated_jobs)
+    if len(report_jobs) < len(curated_jobs):
+        logger.info(
+            "Collapsed %d curated posting(s) into %d unique entries (cross-platform duplicates).",
+            len(curated_jobs),
+            len(report_jobs),
+        )
 
-    # 6. Terminal Summary Funnel
-    print_terminal_funnel(metrics, csv_file=csv_file, md_file=md_file)
+    # 6. Export Output Reports
+    csv_file, md_file = generate_filenames(output_dir=args.output_dir)
+    export_to_csv(report_jobs, csv_file)
+    export_to_markdown(report_jobs, md_file)
+
+    # 7. Terminal Summary Funnel
+    print_terminal_funnel(
+        metrics, csv_file=csv_file, md_file=md_file, unique_postings=len(report_jobs)
+    )
 
     return 130 if interrupted else 0
 

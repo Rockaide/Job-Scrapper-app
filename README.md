@@ -20,7 +20,8 @@ The pipeline runs as one streaming pass, printing each match live instead of wai
    - **Keyword scoring**: weighted match against four keyword categories (see below); must hit at least one of RISC-V, Standard DV, or General Digital/Hardware Design to be eligible at all.
    - **Minimum score threshold** (`--min-score`, default `8.0`).
 4. **Curate** — a listing that survives all of the above is printed immediately to the terminal, saved to `jobs.db` (including salary/compensation fields when the platform provided them), and added to this run's report.
-5. **Report** — once the run ends (or is interrupted with `Ctrl+C` — whatever was curated so far is still exported, nothing is lost), `reporter.py` writes `curated_jobs_YYYY-MM-DD.csv` and `.md`, plus a terminal funnel summary showing how many listings were dropped at each stage.
+5. **Collapse duplicates** — once the run ends, postings that are likely the same real job cross-posted on multiple platforms (matching normalized title + company + city) are merged into one report entry via `collapse_duplicates()`, keeping the highest-scoring version and listing every other source.
+6. **Report** — (or if interrupted with `Ctrl+C` - whatever was curated so far is still exported, nothing is lost) `reporter.py` writes `curated_jobs_YYYY-MM-DD.csv` and `.md`, plus a terminal funnel summary showing how many listings were dropped at each stage. Each entry also gets a **CV match score**, if a local `my_skills.json` is present, showing how many of its extracted Requirements mention one of the candidate's own skills.
 
 ---
 
@@ -31,14 +32,15 @@ The pipeline runs as one streaming pass, printing each match live instead of wai
 ├── scraper.py          # python-jobspy wrapper: query x location rotation, per-platform scraping
 ├── filter.py           # Regex keyword engine: exclusions, weighted scoring, categorization
 ├── db.py               # SQLite persistence & URL-based deduplication
-├── reporter.py          # CSV/Markdown export, live per-job console output, funnel summary
+├── reporter.py          # CSV/Markdown export, duplicate collapsing, live console output, funnel summary
+├── cv_match.py          # Loads a local skills list and scores it against extracted requirements
 ├── demo_data.py         # Offline fixture listings for --demo / testing (no network calls)
-├── tests.py             # unittest suite (filter rules, db, reporter, scraper config)
+├── tests.py             # unittest suite (filter rules, db, reporter, cv_match, scraper config)
 ├── requirements.txt     # python-jobspy, pandas, pydantic
 └── README.md
 ```
 
-Not committed to version control (see `.gitignore`): `.venv/`, `__pycache__/`, `jobs.db` (the local SQLite cache — regenerated per run), and the dated `curated_jobs_*.csv`/`.md` outputs (regenerated per run, not source).
+Not committed to version control (see `.gitignore`): `.venv/`, `__pycache__/`, `jobs.db` (the local SQLite cache — regenerated per run), the dated `curated_jobs_*.csv`/`.md` outputs (regenerated per run, not source), `Vinicius_Rocca_CV.md`, and `my_skills.json` (the CV-derived skills list used for CV-match scoring - personal data, kept local only; see below).
 
 ---
 
@@ -74,6 +76,12 @@ Titles containing `senior`, `sr.`, `staff`, `principal`, `distinguished`, `direc
 
 ### Years-of-Experience Exclusions
 `extract_years_required()` in `filter.py` scans the description for phrases like "5+ years of experience", "3-5 years of relevant experience", or "6+ years of RTL design experience" (requires an explicit tie to the word "experience"/"exp." to avoid false positives like "10+ years in business"). When a posting states several different experience requirements, the highest one is used, since that's the real gate. Postings at or above `--max-years-required` (default `5`) are excluded by default - this exists because the seniority filter above only reads the *title*, so a posting plainly titled "DV Engineer" that requires "8+ years" in the body would otherwise slip through untouched.
+
+### Cross-Platform Duplicate Collapsing
+The same real posting is often scraped separately from LinkedIn, Indeed, and Google Jobs (three different URLs, one underlying job). `collapse_duplicates()` in `reporter.py` fingerprints each curated posting by normalized (title, company, city) and merges matches into a single report entry - keeping the highest-scoring version's fields and listing every other source under **Also Found On** (Markdown) / **Cross-Posted** (CSV). This is a heuristic: postings with missing title or company are never merged (falls back to the URL as a unique key, so incomplete data can't cause a false merge), but two genuinely distinct concurrent openings with an identical title at the same company in the same city would also collapse into one entry.
+
+### CV-Match Scoring
+Each entry's extracted Requirements are cross-referenced against the candidate's own skills, from a local `my_skills.json` (a flat JSON list of strings, e.g. `["RISC-V", "UVM", "SystemVerilog", ...]`) - gitignored since it's derived from the candidate's CV. `cv_match.py`'s `score_requirements_match()` counts how many requirement bullets mention at least one listed skill (whole-word, case-insensitive), shown as e.g. **CV Match: 6/9 (67%)**. If `my_skills.json` doesn't exist (e.g. a fresh clone), this is silently skipped - no CV Match field is shown, everything else works normally. To enable it, create `my_skills.json` in the project root with your own skills list.
 
 ---
 
@@ -143,8 +151,8 @@ python -m unittest tests.py -v
 ## Generated Artifacts (not committed to git)
 
 1. **`jobs.db`** — local SQLite cache of every curated job ever seen (including salary/compensation fields when provided), used for cross-run URL deduplication. Column migrations (e.g. the salary columns) are applied automatically on startup via `ALTER TABLE`, so an existing database from an older version of this tool upgrades in place without data loss.
-2. **`curated_jobs_YYYY-MM-DD.csv`** — columns: `Title`, `Company`, `Location`, `Remote`, `Salary`, `Score`, `Category`, `Matched Keywords`, `URL`. `Salary` is blank when the platform didn't provide compensation data for that posting.
-3. **`curated_jobs_YYYY-MM-DD.md`** — grouped by country (Canada, France, Netherlands, Switzerland, Spain, Remote, then Other/Unspecified for anything that doesn't resolve to a target market), sorted descending by score within each country, each entry a clickable link back to the original posting, tagged with its domain category, and its salary range when available (`format_salary()` in `reporter.py`, from `jobspy`'s own min/max/currency/interval fields - previously captured but silently discarded). Country is inferred from the listing's own location text (`extract_country()` in `reporter.py`) - it checks for an explicit country name first, then falls back to matching known target/satellite cities, since some platforms omit the country.
+2. **`curated_jobs_YYYY-MM-DD.csv`** — columns: `Title`, `Company`, `Location`, `Remote`, `Salary`, `Score`, `Category`, `CV Match`, `Matched Keywords`, `Cross-Posted`, `URL`. `Salary`/`CV Match`/`Cross-Posted` are blank when not applicable (no compensation data, no `my_skills.json` or no extracted requirements, or no other source found, respectively).
+3. **`curated_jobs_YYYY-MM-DD.md`** — grouped by country (Canada, France, Netherlands, Switzerland, Spain, Remote, then Other/Unspecified for anything that doesn't resolve to a target market), sorted descending by score within each country, each entry a clickable link back to the original posting, tagged with its domain category, its salary range when available (`format_salary()` in `reporter.py`, from `jobspy`'s own min/max/currency/interval fields - previously captured but silently discarded), and its CV match score when `my_skills.json` is configured. Country is inferred from the listing's own location text (`extract_country()` in `reporter.py`) - it checks for an explicit country name first, then falls back to matching known target/satellite cities, since some platforms omit the country.
 
    Each entry also shows a **Requirements** list rather than a generic first-few-sentences blurb: `extract_requirements()` scans the description for a recognized section header (`Requirements`, `Qualifications`, `What You'll Need`, `About You`, etc.), collects the bullets that follow it, and stops at the next recognized section (`Responsibilities`, `Benefits`, `About Us`, etc.). If no such section is found - some postings are unstructured prose - it falls back to the old generic excerpt under an **Overview** label instead.
 4. **Terminal output** — a `[+] CURATED ...` line printed live as each match is found, followed by a funnel summary at the end: `Total Scraped -> Excluded by URL Cache -> Dropped by Hard Exclusions -> Dropped by Citizenship/Sponsorship -> Dropped by Seniority Mismatch -> Dropped by Experience Mismatch -> Dropped by Low Score -> Successfully Curated`.

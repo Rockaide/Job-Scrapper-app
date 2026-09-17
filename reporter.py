@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from cv_match import format_match, load_skills, score_requirements_match
 from filter import CAT_ASIC_UVM, CAT_FPGA, CAT_GENERAL, CAT_RISCV
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,69 @@ def format_salary(job: dict[str, Any]) -> str:
     return f"Up to {currency} {_fmt(max_amount)}/{label}"
 
 
+def _normalize_for_fingerprint(text: str) -> str:
+    """Lowercase and strip punctuation/whitespace noise for fuzzy comparison."""
+    text = (text or "").lower().strip()
+    text = re.sub(r"[^\w\s]", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _duplicate_fingerprint(job: dict[str, Any]) -> str:
+    """Build a fuzzy-match key (normalized title + company + city) to identify the
+    same real posting scraped from multiple platforms. Falls back to the job's own
+    URL when title or company is missing, so postings with incomplete data are never
+    incorrectly grouped together."""
+    title = _normalize_for_fingerprint(str(job.get("title") or ""))
+    company = _normalize_for_fingerprint(str(job.get("company") or ""))
+    if not title or not company:
+        return f"__unique__:{job.get('job_url') or job.get('url') or id(job)}"
+
+    location = str(job.get("location") or "")
+    city = _normalize_for_fingerprint(location.split(",")[0]) if location else ""
+    return f"{title}|{company}|{city}"
+
+
+def collapse_duplicates(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse postings that are likely the same real job scraped separately from
+    multiple platforms (matching normalized title + company + city) into a single
+    entry, keeping the highest-scoring version's fields and recording every other
+    source under 'duplicate_sources'.
+
+    This is a heuristic, not a guarantee: two genuinely distinct concurrent openings
+    with an identical title at the same company in the same city would also collapse.
+    Order of the input list (already score-sorted upstream) is preserved for groups.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for job in jobs:
+        key = _duplicate_fingerprint(job)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(job)
+
+    collapsed: list[dict[str, Any]] = []
+    for key in order:
+        group = groups[key]
+        if len(group) == 1:
+            collapsed.append(group[0])
+            continue
+
+        group_sorted = sorted(group, key=lambda j: float(j.get("score", 0.0)), reverse=True)
+        primary = dict(group_sorted[0])
+        primary["duplicate_count"] = len(group_sorted)
+        primary["duplicate_sources"] = [
+            {
+                "platform": str(g.get("platform") or g.get("site") or "web"),
+                "job_url": str(g.get("job_url") or g.get("url") or ""),
+            }
+            for g in group_sorted
+        ]
+        collapsed.append(primary)
+
+    return collapsed
+
+
 @dataclass
 class PipelineMetrics:
     """Tracks metrics across each stage of the scraping and filtering pipeline."""
@@ -186,10 +250,13 @@ def generate_filenames(output_dir: str | Path = ".", date_str: Optional[str] = N
 def export_to_csv(jobs: list[dict[str, Any]], target_file: Path | str) -> Path:
     """Export curated jobs to structured CSV.
 
-    Columns: Title, Company, Location, Remote, Salary, Score, Category, Matched Keywords, URL.
+    Columns: Title, Company, Location, Remote, Salary, Score, Category, CV Match,
+    Matched Keywords, Cross-Posted, URL.
     """
     path = Path(target_file)
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    skills = load_skills()
 
     fieldnames = [
         "Title",
@@ -199,7 +266,9 @@ def export_to_csv(jobs: list[dict[str, Any]], target_file: Path | str) -> Path:
         "Salary",
         "Score",
         "Category",
+        "CV Match",
         "Matched Keywords",
+        "Cross-Posted",
         "URL",
     ]
 
@@ -224,6 +293,16 @@ def export_to_csv(jobs: list[dict[str, Any]], target_file: Path | str) -> Path:
             remote_val = job.get("is_remote")
             remote_str = "Yes" if remote_val in (True, 1, "1", "True", "true") else "No"
 
+            raw_desc = job.get("raw_description") or job.get("description") or ""
+            requirements = extract_requirements(raw_desc)
+            matched, total = score_requirements_match(requirements, skills)
+
+            other_sources = job.get("duplicate_sources") or []
+            cross_posted = ", ".join(
+                s["platform"].capitalize() for s in other_sources
+                if s.get("job_url") != (job.get("job_url") or job.get("url"))
+            )
+
             row = {
                 "Title": str(job.get("title") or "").strip(),
                 "Company": str(job.get("company") or "").strip(),
@@ -232,7 +311,9 @@ def export_to_csv(jobs: list[dict[str, Any]], target_file: Path | str) -> Path:
                 "Salary": format_salary(job),
                 "Score": f"{float(job.get('score', 0.0)):.1f}",
                 "Category": str(job.get("category") or "").strip(),
+                "CV Match": format_match(matched, total),
                 "Matched Keywords": kw_str,
+                "Cross-Posted": cross_posted,
                 "URL": str(job.get("job_url") or job.get("url") or "").strip(),
             }
             writer.writerow(row)
@@ -365,6 +446,7 @@ def export_to_markdown(jobs: list[dict[str, Any]], target_file: Path | str) -> P
     priority order) and sorted descending by Score within each country."""
     path = Path(target_file)
     path.parent.mkdir(parents=True, exist_ok=True)
+    skills = load_skills()
 
     # Sort all jobs descending by score
     sorted_jobs = sorted(jobs, key=lambda j: float(j.get("score", 0.0)), reverse=True)
@@ -441,6 +523,8 @@ def export_to_markdown(jobs: list[dict[str, Any]], target_file: Path | str) -> P
             raw_desc = job.get("raw_description") or job.get("description") or ""
             requirements = extract_requirements(raw_desc)
             salary = format_salary(job)
+            matched, total = score_requirements_match(requirements, skills)
+            cv_match = format_match(matched, total)
 
             lines.append(f"### {idx}. [{title}]({url})")
             company_line = (
@@ -450,9 +534,10 @@ def export_to_markdown(jobs: list[dict[str, Any]], target_file: Path | str) -> P
             if salary:
                 company_line += f" | **Salary:** {salary}"
             lines.append(company_line)
-            lines.append(
-                f"- **Category:** {category} | **Platform:** {platform} | **Posted:** {date_posted}"
-            )
+            category_line = f"- **Category:** {category} | **Platform:** {platform} | **Posted:** {date_posted}"
+            if cv_match:
+                category_line += f" | **CV Match:** {cv_match}"
+            lines.append(category_line)
             lines.append(f"- **Matched Keywords:** {kw_badges}")
             if requirements:
                 lines.append("- **Requirements:**")
@@ -462,6 +547,17 @@ def export_to_markdown(jobs: list[dict[str, Any]], target_file: Path | str) -> P
                 excerpt = _clean_excerpt(raw_desc)
                 if excerpt:
                     lines.append(f"- **Overview:** {excerpt}")
+
+            other_sources = [
+                s for s in (job.get("duplicate_sources") or [])
+                if s.get("job_url") and s["job_url"] != url
+            ]
+            if other_sources:
+                links = " · ".join(
+                    f"[{s['platform'].capitalize()}]({s['job_url']})" for s in other_sources
+                )
+                lines.append(f"- **Also Found On:** {links}")
+
             lines.append("")
 
         lines.append("---")
@@ -500,6 +596,7 @@ def print_terminal_funnel(
     metrics: PipelineMetrics,
     csv_file: Optional[Path | str] = None,
     md_file: Optional[Path | str] = None,
+    unique_postings: Optional[int] = None,
 ) -> None:
     """Display the formatted terminal output showing the pipeline funnel."""
     sep_double = "=" * 78
@@ -517,6 +614,8 @@ def print_terminal_funnel(
     print(f"  [7] Dropped by Low Score:              {metrics.dropped_by_low_score:>5}  (Below threshold or off-domain)")
     print(sep_single)
     print(f"  [8] Successfully Curated:              {metrics.successfully_curated:>5}")
+    if unique_postings is not None and unique_postings != metrics.successfully_curated:
+        print(f"  [9] Unique After De-duplication:       {unique_postings:>5}  (Cross-platform duplicates collapsed)")
     print(sep_double)
 
     # Funnel Flow Summary

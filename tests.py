@@ -23,9 +23,11 @@ from filter import (
     evaluate_job,
     extract_years_required,
 )
+from cv_match import format_match, load_skills, score_requirements_match
 from reporter import (
     CATEGORY_ORDER,
     PipelineMetrics,
+    collapse_duplicates,
     export_to_csv,
     export_to_markdown,
     extract_country,
@@ -427,6 +429,10 @@ class TestReporter(unittest.TestCase):
                 "job_url": "https://linkedin.com/jobs/view/778",
                 "score": 10.0,
                 "category": CAT_RISCV,
+                "duplicate_sources": [
+                    {"platform": "linkedin", "job_url": "https://linkedin.com/jobs/view/778"},
+                    {"platform": "indeed", "job_url": "https://indeed.com/viewjob?jk=999"},
+                ],
             },
         ]
         export_to_csv(jobs, self.csv_path)
@@ -434,8 +440,8 @@ class TestReporter(unittest.TestCase):
         with open(self.csv_path, mode="r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             expected_headers = [
-                "Title", "Company", "Location", "Remote", "Salary",
-                "Score", "Category", "Matched Keywords", "URL"
+                "Title", "Company", "Location", "Remote", "Salary", "Score", "Category",
+                "CV Match", "Matched Keywords", "Cross-Posted", "URL",
             ]
             self.assertEqual(reader.fieldnames, expected_headers)
             rows = list(reader)
@@ -448,7 +454,12 @@ class TestReporter(unittest.TestCase):
             self.assertEqual(row["Score"], "18.0")
             self.assertEqual(row["Category"], CAT_RISCV)
             self.assertIn("risc-v", row["Matched Keywords"])
+            self.assertEqual(row["Cross-Posted"], "")
             self.assertEqual(rows[1]["Salary"], "")
+            self.assertEqual(rows[1]["Cross-Posted"], "Indeed")
+            # No description on either job -> no extracted requirements -> no CV Match value
+            self.assertEqual(row["CV Match"], "")
+            self.assertEqual(rows[1]["CV Match"], "")
 
     def test_export_to_markdown_country_grouping_and_ordering(self):
         """Verify Markdown groups jobs by country (target-market order) and sorts
@@ -603,6 +614,125 @@ About Us: we are a fast-growing startup.
         """Verify no salary data yields an empty string, not a placeholder."""
         self.assertEqual(format_salary({}), "")
         self.assertEqual(format_salary({"min_amount": None, "max_amount": None}), "")
+
+    def test_collapse_duplicates_merges_cross_platform_matches(self):
+        """Verify same title+company+city across platforms collapses into one entry,
+        keeping the highest-scoring version and recording every source."""
+        jobs = [
+            {
+                "title": "DV Engineer",
+                "company": "ChipCo",
+                "location": "Toronto, ON, Canada",
+                "platform": "linkedin",
+                "job_url": "https://linkedin.com/jobs/view/1",
+                "score": 15.0,
+            },
+            {
+                "title": "dv engineer",  # different case/whitespace, same job
+                "company": "ChipCo",
+                "location": "Toronto, Canada",
+                "platform": "indeed",
+                "job_url": "https://indeed.com/viewjob?jk=2",
+                "score": 12.0,
+            },
+            {
+                "title": "ASIC Verification Engineer",
+                "company": "OtherCorp",
+                "location": "Montreal, Canada",
+                "platform": "linkedin",
+                "job_url": "https://linkedin.com/jobs/view/3",
+                "score": 20.0,
+            },
+        ]
+        result = collapse_duplicates(jobs)
+        self.assertEqual(len(result), 2)
+
+        merged = next(j for j in result if j["company"] == "ChipCo")
+        self.assertEqual(merged["job_url"], "https://linkedin.com/jobs/view/1")  # highest score kept
+        self.assertEqual(merged["duplicate_count"], 2)
+        sources = {s["job_url"] for s in merged["duplicate_sources"]}
+        self.assertEqual(sources, {"https://linkedin.com/jobs/view/1", "https://indeed.com/viewjob?jk=2"})
+
+        untouched = next(j for j in result if j["company"] == "OtherCorp")
+        self.assertNotIn("duplicate_count", untouched)
+
+    def test_collapse_duplicates_does_not_merge_missing_data(self):
+        """Verify postings with missing title/company never get merged together,
+        even though their fingerprint would otherwise collide."""
+        jobs = [
+            {"title": "", "company": "", "job_url": "https://example.com/a", "score": 5.0},
+            {"title": "", "company": "", "job_url": "https://example.com/b", "score": 5.0},
+        ]
+        result = collapse_duplicates(jobs)
+        self.assertEqual(len(result), 2)
+
+    def test_collapse_duplicates_preserves_singletons(self):
+        """Verify a list with no duplicates passes through unchanged."""
+        jobs = [
+            {"title": "DV Engineer", "company": "A", "location": "Paris", "job_url": "https://x.com/1", "score": 5.0},
+            {"title": "FPGA Engineer", "company": "B", "location": "Lyon", "job_url": "https://x.com/2", "score": 8.0},
+        ]
+        result = collapse_duplicates(jobs)
+        self.assertEqual(len(result), 2)
+        self.assertNotIn("duplicate_count", result[0])
+        self.assertNotIn("duplicate_count", result[1])
+
+
+class TestCVMatch(unittest.TestCase):
+    """Tests for cv_match.py: skills loading and requirements-overlap scoring."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.skills_path = Path(self.test_dir) / "skills.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_load_skills_missing_file_returns_empty(self):
+        """Verify a missing skills file yields an empty list, not an error."""
+        self.assertEqual(load_skills(Path(self.test_dir) / "nonexistent.json"), [])
+
+    def test_load_skills_valid_file(self):
+        """Verify a valid JSON list of skills loads and is whitespace-trimmed."""
+        self.skills_path.write_text('["RISC-V", " UVM ", "SystemVerilog"]', encoding="utf-8")
+        self.assertEqual(load_skills(self.skills_path), ["RISC-V", "UVM", "SystemVerilog"])
+
+    def test_load_skills_malformed_json_returns_empty(self):
+        """Verify malformed JSON is handled gracefully rather than raising."""
+        self.skills_path.write_text("not valid json{{{", encoding="utf-8")
+        self.assertEqual(load_skills(self.skills_path), [])
+
+    def test_load_skills_wrong_shape_returns_empty(self):
+        """Verify a JSON object (not a list) is rejected gracefully."""
+        self.skills_path.write_text('{"skill": "RISC-V"}', encoding="utf-8")
+        self.assertEqual(load_skills(self.skills_path), [])
+
+    def test_score_requirements_match_counts_overlap(self):
+        """Verify each requirement is counted as matched if it mentions a known skill."""
+        requirements = [
+            "5+ years of UVM experience",
+            "Strong knowledge of SystemVerilog and RISC-V",
+            "Excellent communication skills",
+        ]
+        skills = ["UVM", "RISC-V"]
+        matched, total = score_requirements_match(requirements, skills)
+        self.assertEqual((matched, total), (2, 3))
+
+    def test_score_requirements_match_whole_word_only(self):
+        """Verify skill matching respects word boundaries (no substring false positives)."""
+        requirements = ["Experience with UVMx internal tooling"]
+        matched, total = score_requirements_match(requirements, ["UVM"])
+        self.assertEqual((matched, total), (0, 1))
+
+    def test_score_requirements_match_empty_inputs(self):
+        """Verify empty requirements or empty skills are handled without error."""
+        self.assertEqual(score_requirements_match([], ["UVM"]), (0, 0))
+        self.assertEqual(score_requirements_match(["UVM required"], []), (0, 1))
+
+    def test_format_match(self):
+        """Verify match formatting and the empty-total case."""
+        self.assertEqual(format_match(6, 9), "6/9 (67%)")
+        self.assertEqual(format_match(0, 0), "")
 
 
 class TestScraperConfig(unittest.TestCase):
