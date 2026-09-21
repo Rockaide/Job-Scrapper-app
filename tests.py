@@ -734,6 +734,64 @@ class TestCVMatch(unittest.TestCase):
         self.assertEqual(format_match(6, 9), "6/9 (67%)")
         self.assertEqual(format_match(0, 0), "")
 
+    def test_score_requirements_match_cpp_csharp_and_markdown_escapes(self):
+        """Verify C++ and C# match accurately with punctuation, markdown escapes, and boundary checks."""
+        requirements = [
+            r"Languages: C, C\+\+, Python, Java",
+            "Experience with C# for Unity simulation",
+            "Pure C programming for firmware",
+        ]
+        # Candidate with C++ and C#
+        matched_cpp, total = score_requirements_match(requirements, ["C++"])
+        self.assertEqual(matched_cpp, 1)
+
+        matched_cs, total = score_requirements_match(requirements, ["C#"])
+        self.assertEqual(matched_cs, 1)
+
+        # Candidate with only C: should match line 1 (mentions C) and line 3 (mentions C), but not line 2
+        # nor count line 2 due to C#
+        matched_c, total = score_requirements_match(["C++ only", "C# only", "C only"], ["C"])
+        self.assertEqual(matched_c, 1)
+
+    def test_score_requirements_match_hyphen_space_equivalence(self):
+        """Verify hyphenated skills match space-separated requirement text and vice versa."""
+        requirements = [
+            "Experience in constrained random verification methodologies",
+            "Hands-on step and compare co simulation",
+        ]
+        skills = ["Constrained-Random", "Step-and-Compare"]
+        matched, total = score_requirements_match(requirements, skills)
+        self.assertEqual(matched, 2)
+
+    def test_extract_requirements_multilingual_and_amd_headers(self):
+        """Verify French, AMD consecutive blocks, and proper stopper behavior."""
+        amd_desc = """
+**The Role**
+Join the verification team.
+**Preferred Experience**
+* 2+ years of RTL design and UVM testbenches
+* Strong Python scripting skills
+**Academic Credentials**
+* Bachelor's or Master's degree in Computer Engineering
+**Location**
+Markham, Ontario
+"""
+        reqs = extract_requirements(amd_desc)
+        self.assertEqual(len(reqs), 3)
+        self.assertIn("2+ years of RTL design and UVM testbenches", reqs[0])
+        self.assertIn("Bachelor's or Master's degree in Computer Engineering", reqs[2])
+
+        french_desc = """
+**Votre Profil**
+* Expérience en vérification UVM et SystemVerilog
+* De formation Bac+5 ou Ingénieur
+**Présentation de l'entreprise**
+Leader mondial de la tech.
+"""
+        reqs_fr = extract_requirements(french_desc)
+        self.assertEqual(len(reqs_fr), 2)
+        self.assertNotIn("Leader mondial", reqs_fr)
+
 
 class TestScraperConfig(unittest.TestCase):
     """Tests for query rotation list and scraper configuration defaults."""

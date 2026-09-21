@@ -46,7 +46,23 @@ def load_skills(path: str | Path = DEFAULT_SKILLS_PATH) -> list[str]:
 
 
 def _build_skill_patterns(skills: list[str]) -> list[re.Pattern]:
-    return [re.compile(r"\b" + re.escape(skill.lower()) + r"\b") for skill in skills]
+    patterns = []
+    for skill in skills:
+        s = skill.lower().strip()
+        if not s:
+            continue
+        left_b = r"\b" if re.match(r"^\w", s) else r"(?<!\w)"
+        if s == "c":
+            right_b = r"\b(?![+#])"
+        elif re.match(r".*\w$", s):
+            right_b = r"\b"
+        else:
+            right_b = r"(?!\w)"
+
+        parts = [re.escape(p) for p in re.split(r"[-_\s]+", s)]
+        core = r"[-_\s]+".join(parts)
+        patterns.append(re.compile(left_b + core + right_b, re.IGNORECASE))
+    return patterns
 
 
 def score_requirements_match(
@@ -67,8 +83,9 @@ def score_requirements_match(
     patterns = _build_skill_patterns(skills)
     matched = 0
     for req in requirements:
-        req_lower = req.lower()
-        if any(pattern.search(req_lower) for pattern in patterns):
+        # Strip markdown backslash escapes (e.g. C\+\+ -> C++, problem\-solving -> problem-solving)
+        req_clean = re.sub(r"\\([+#\-_*])", r"\1", req).lower()
+        if any(pattern.search(req_clean) for pattern in patterns):
             matched += 1
     return (matched, len(requirements))
 

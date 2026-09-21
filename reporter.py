@@ -337,6 +337,7 @@ def _clean_excerpt(description: str, max_chars: int = 240) -> str:
 
 # Section headers that mark the start of the skills/requirements block we want to extract.
 _REQUIREMENTS_HEADER_PHRASES = {
+    # Standard English
     "requirements", "requirement", "required qualifications", "minimum qualifications",
     "preferred qualifications", "basic qualifications", "key requirements",
     "qualifications", "key qualifications", "required skills", "technical skills",
@@ -344,22 +345,48 @@ _REQUIREMENTS_HEADER_PHRASES = {
     "what youll need", "what you need", "what you bring", "what we're looking for",
     "what we are looking for", "must haves", "must have", "you have", "about you",
     "your profile", "your background", "skills and experience", "experience required",
+    # AMD and enterprise variations
+    "preferred experience", "academic credentials", "the person", "who we are looking for",
+    "who you are", "what we need", "qualifications & experience", "qualifications and experience",
+    "desired qualifications", "minimum requirements", "basic requirements",
+    # French market
+    "profil recherché", "votre profil", "profil", "compétences requises",
+    "compétences recherchées", "vos compétences", "points incontournables",
+    "prérequis", "formation", "ce que nous recherchons",
+    # Spanish market
+    "requisitos", "requerimientos", "perfil buscado", "qué buscamos", "lo que buscamos",
+    # Dutch market
+    "wat neem jij mee", "wat breng je mee", "jouw profiel",
 }
 
 # Section headers that mark the start of a DIFFERENT block, used only to know where the
 # requirements block ends (they are not extracted themselves).
 _OTHER_SECTION_HEADER_PHRASES = {
+    # Standard English
     "responsibilities", "key responsibilities", "duties", "what you'll do",
     "what youll do", "what you will do", "role", "about the role", "about us",
     "about the company", "about the team", "benefits", "perks", "compensation",
     "salary", "how to apply", "equal opportunity", "equal employment", "diversity",
     "why join us", "our culture", "overview", "summary", "job summary", "description",
+    "job description", "location", "locations", "note", "notes", "nice to have",
+    "nice to haves", "what you will learn", "who we are", "about",
+    # French market
+    "présentation de l'entreprise", "présentation de l’entreprise", "vos missions",
+    "missions principales", "missions", "notre entreprise", "pourquoi nous rejoindre",
+    "nos engagements", "qui sommes-nous", "qui sommes nous", "ce que nous offrons",
+    "rémunération", "à propos", "l'entreprise",
+    # Spanish market
+    "funciones", "sobre nosotros", "por qué unirte",
+    # Dutch market
+    "wat ga jij doen", "wat is het doel", "wat kan je van ons verwachten", "onze kernwaarden",
 }
 
 
 def _normalize_header_line(line: str) -> str:
     """Strip markdown decoration from a line, returning its bare lowercase text."""
     stripped = re.sub(r"^#{1,6}\s*", "", line.strip())
+    # Normalize unicode apostrophes and backticks
+    stripped = stripped.replace("’", "'").replace("`", "'")
     stripped = stripped.strip("*_ \t")
     return stripped.rstrip(":").strip().lower()
 
@@ -368,12 +395,14 @@ def _header_kind(line: str) -> Optional[str]:
     """Classify a line as a 'requirements' header, an 'other' section header, or
     neither. Only short lines are considered, since real headers are brief."""
     norm = _normalize_header_line(line)
-    if not norm or len(norm) > 40:
+    if not norm or len(norm) > 55 or len(norm.split()) > 7:
         return None
-    if any(phrase in norm for phrase in _REQUIREMENTS_HEADER_PHRASES):
-        return "requirements"
-    if any(phrase in norm for phrase in _OTHER_SECTION_HEADER_PHRASES):
-        return "other"
+    for phrase in _REQUIREMENTS_HEADER_PHRASES:
+        if re.search(r"\b" + re.escape(phrase) + r"\b", norm):
+            return "requirements"
+    for phrase in _OTHER_SECTION_HEADER_PHRASES:
+        if re.search(r"\b" + re.escape(phrase) + r"\b", norm):
+            return "other"
     return None
 
 
@@ -382,11 +411,11 @@ def extract_requirements(
 ) -> list[str]:
     """Extract the skills/requirements bullet points from a job description.
 
-    Scans for a recognized "Requirements"/"Qualifications"/etc. section header, then
-    collects the bullet lines that follow it, stopping at the next recognized section
-    header (e.g. "Responsibilities", "Benefits") or at max_items. Returns an empty list
-    if no such section is found - callers should fall back to a generic excerpt then,
-    since not every posting is structured this cleanly.
+    Scans for recognized requirements section headers, collecting bullet points across
+    consecutive requirement sections (e.g. 'Preferred Experience' + 'Academic Credentials'),
+    stitching wrapped lines, and stopping when hitting an 'other' section header
+    (e.g. 'Responsibilities', 'Benefits', 'About Us'). Returns an empty list
+    if no requirements section is found.
     """
     if not description:
         return []
@@ -402,41 +431,75 @@ def extract_requirements(
     if start_idx is None:
         return []
 
-    end_idx = len(lines)
-    for j in range(start_idx, len(lines)):
-        if _header_kind(lines[j]) is not None:
-            end_idx = j
-            break
-
-    chunk_lines = lines[start_idx:end_idx]
-
     def _truncate(item: str) -> str:
         if len(item) > max_chars_per_item:
             return item[:max_chars_per_item].rstrip() + "..."
         return item
 
-    bullets: list[str] = []
-    for line in chunk_lines:
-        item = re.sub(r"^[-*•●▪]+\s*", "", line.strip())
-        item = re.sub(r"^\d+[.)]\s*", "", item).strip()
-        if not item:
+    raw_bullets: list[str] = []
+    current_bullet: list[str] = []
+    has_explicit_bullets = False
+
+    for j in range(start_idx, len(lines)):
+        line = lines[j]
+        stripped = line.strip()
+        if not stripped:
             continue
-        bullets.append(_truncate(item))
-        if len(bullets) >= max_items:
+
+        is_bullet_start = bool(
+            re.match(r"^[-*•●▪+]\s+", stripped) or re.match(r"^\d+[.)]\s+", stripped)
+        )
+
+        if not is_bullet_start:
+            kind = _header_kind(line)
+            if kind == "other":
+                break
+            elif kind == "requirements":
+                if current_bullet:
+                    raw_bullets.append(" ".join(current_bullet))
+                    current_bullet = []
+                continue
+
+        cleaned = re.sub(r"^[-*•●▪+]\s*", "", stripped)
+        cleaned = re.sub(r"^\d+[.)]\s*", "", cleaned).strip("*_ \t")
+
+        if not cleaned or cleaned in ("**", "***", "---"):
+            continue
+
+        if is_bullet_start:
+            has_explicit_bullets = True
+            if current_bullet:
+                raw_bullets.append(" ".join(current_bullet))
+            current_bullet = [cleaned]
+        else:
+            if current_bullet and has_explicit_bullets:
+                current_bullet.append(cleaned)
+            else:
+                current_bullet.append(cleaned)
+
+        if len(raw_bullets) >= max_items:
             break
 
-    # No bullet-per-line structure (a single prose paragraph) - split on sentences instead.
-    if len(bullets) <= 1 and chunk_lines:
-        blob = " ".join(line.strip() for line in chunk_lines if line.strip())
-        if blob:
-            bullets = []
-            for sentence in re.split(r"(?<=[.;])\s+", blob):
-                sentence = sentence.strip()
-                if not sentence:
-                    continue
-                bullets.append(_truncate(sentence))
-                if len(bullets) >= max_items:
-                    break
+    if current_bullet and len(raw_bullets) < max_items:
+        raw_bullets.append(" ".join(current_bullet))
+
+    if not has_explicit_bullets and raw_bullets:
+        blob = " ".join(raw_bullets)
+        sentences = [
+            s.strip() for s in re.split(r"(?<=[.;])\s+", blob) if s.strip()
+        ]
+        if len(sentences) > 1:
+            raw_bullets = sentences
+
+    bullets: list[str] = []
+    seen = set()
+    for b in raw_bullets:
+        cleaned_b = _truncate(b.strip())
+        if cleaned_b and cleaned_b not in seen:
+            seen.add(cleaned_b)
+            bullets.append(cleaned_b)
+            if len(bullets) >= max_items:
+                break
 
     return bullets
 
